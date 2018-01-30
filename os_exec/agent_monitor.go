@@ -10,14 +10,13 @@ import (
 	"os/exec"
 	"io/ioutil"
 	"strings"
+	"bytes"
+	"strconv"
 	"encoding/json"
 	"database/sql"
 
 	"github.com/influxdata/influxdb/client/v2"
 	_ "github.com/go-sql-driver/mysql"
-
-	"bytes"
-	"strconv"
 )
 
 type Cgk struct {
@@ -42,7 +41,7 @@ type GlobalConfig struct {
 	ServerTypeId   int      `json:"server_type_id"`
 	LocalIp        string   `json:"local_ip"`
 	ExecFile       string   `json:"exec_file"`
-	Interval       int		`json:"interval"`
+	Interval       int      `json:"interval"`
 	Timeout        int      `json:"timeout"`
 	Cgks           []Cgk    `json:"cgks"`
 	Influxdb       Influxdb `json:"influxdb"`
@@ -56,19 +55,19 @@ type Agent struct {
 }
 
 type Monitor struct {
-	bp client.BatchPoints
+	bp     client.BatchPoints
 	points []*client.Point
 }
 
 var (
 	config         *GlobalConfig
 	cgkConnections []*sql.DB
-	infConnection client.Client
-	wg sync.WaitGroup
+	infConnection  client.Client
+	wg             sync.WaitGroup
 )
 
-func (this *Monitor) initInfluxdb()  {
-	q := client.NewQuery("CREATE DATABASE " + config.Influxdb.Database, "", "")
+func (this *Monitor) initInfluxdb() {
+	q := client.NewQuery("CREATE DATABASE "+config.Influxdb.Database, "", "")
 	response, err := infConnection.Query(q)
 	if err != nil {
 		log.Fatalln(err)
@@ -89,7 +88,7 @@ func (this *Monitor) initInfluxdb()  {
 
 	bp, _ := client.NewBatchPoints(client.BatchPointsConfig{
 		Precision: "s",
-		Database: config.Influxdb.Database,
+		Database:  config.Influxdb.Database,
 	})
 	bp.SetRetentionPolicy("agent_retention")
 	this.bp = bp
@@ -131,7 +130,7 @@ func (this *Monitor) runCollect() {
 		}
 		wg.Wait()
 		this.report()
-		time.Sleep(time.Duration(config.Interval)*time.Second)
+		time.Sleep(time.Duration(config.Interval) * time.Second)
 	}
 }
 
@@ -147,7 +146,7 @@ func (this *Monitor) collect(agent *Agent) {
 	defer wg.Done()
 	ch := make(chan bool)
 	go func() {
-		tags := map[string]string {}
+		tags := map[string]string{}
 		fields := map[string]interface{}{}
 		cmd := exec.Command(config.ExecFile, config.LocalIp, agent.ip, strconv.Itoa(agent.port))
 		var out bytes.Buffer
@@ -158,7 +157,7 @@ func (this *Monitor) collect(agent *Agent) {
 			return
 		}
 		results := map[string]string{}
-		for _, line := range strings.Split(out.String(),"\n") {
+		for _, line := range strings.Split(out.String(), "\n") {
 			if line == "" {
 				continue
 			}
@@ -190,7 +189,7 @@ func (this *Monitor) collect(agent *Agent) {
 
 	select {
 	case <-ch:
-	case <-time.After(time.Duration(config.Timeout)*time.Second):
+	case <-time.After(time.Duration(config.Timeout) * time.Second):
 		log.Println("WARNING timeout", agent.ip, agent.port)
 	}
 }
