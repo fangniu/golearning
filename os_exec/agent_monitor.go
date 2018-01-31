@@ -66,6 +66,18 @@ var (
 	wg             sync.WaitGroup
 )
 
+func initMysqlConns() {
+	var err error
+	infConnection, err = client.NewHTTPClient(client.HTTPConfig{
+		Addr:     fmt.Sprintf("http://%s:%d", config.Influxdb.Host, config.Influxdb.Port),
+		Username: config.Influxdb.Username,
+		Password: config.Influxdb.Password,
+	})
+	if err != nil {
+		log.Fatalln(err)
+	}
+}
+
 func (m *Monitor) initInfluxdb() {
 	q := client.NewQuery("CREATE DATABASE "+config.Influxdb.Database, "", "")
 	response, err := infConnection.Query(q)
@@ -230,22 +242,13 @@ func parseConfig(cfg string) {
 		}
 		cgkConnections = append(cgkConnections, db)
 	}
-
-	c, err := client.NewHTTPClient(client.HTTPConfig{
-		Addr:     fmt.Sprintf("http://%s:%d", config.Influxdb.Host, config.Influxdb.Port),
-		Username: config.Influxdb.Username,
-		Password: config.Influxdb.Password,
-	})
-	if err != nil {
-		log.Fatalln(err)
-	}
-	infConnection = c
 }
 
 func main() {
 	cfg := flag.String("c", "config.json", "configuration file")
 	flag.Parse()
 	parseConfig(*cfg)
+	initMysqlConns()
 	m := Monitor{}
 	m.initInfluxdb()
 	defer m.close()
