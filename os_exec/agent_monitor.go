@@ -66,7 +66,7 @@ var (
 	wg             sync.WaitGroup
 )
 
-func (this *Monitor) initInfluxdb() {
+func (m *Monitor) initInfluxdb() {
 	q := client.NewQuery("CREATE DATABASE "+config.Influxdb.Database, "", "")
 	response, err := infConnection.Query(q)
 	if err != nil {
@@ -91,10 +91,10 @@ func (this *Monitor) initInfluxdb() {
 		Database:  config.Influxdb.Database,
 	})
 	bp.SetRetentionPolicy("agent_retention")
-	this.bp = bp
+	m.bp = bp
 }
 
-func (this *Monitor) getAgents() [] *Agent {
+func getAgents() [] *Agent {
 	var agents [] *Agent
 	for _, cgk := range cgkConnections {
 		rows, err := cgk.Query("SELECT ip_b, port_b FROM t_server WHERE server_type_id = ?", config.ServerTypeId)
@@ -115,34 +115,34 @@ func (this *Monitor) getAgents() [] *Agent {
 	return agents
 }
 
-func (this *Monitor) close() {
+func (m *Monitor) close() {
 	for _, c := range cgkConnections {
 		c.Close()
 	}
 	infConnection.Close()
 }
 
-func (this *Monitor) runCollect() {
+func (m *Monitor) runCollect() {
 	for true {
-		for _, agent := range this.getAgents() {
+		for _, agent := range getAgents() {
 			wg.Add(1)
-			go this.collect(agent)
+			go m.collect(agent)
 		}
 		wg.Wait()
-		this.report()
+		m.report()
 		time.Sleep(time.Duration(config.Interval) * time.Second)
 	}
 }
 
-func (this *Monitor) report() {
-	this.bp.AddPoints(this.points)
-	if err := infConnection.Write(this.bp); err != nil {
+func (m *Monitor) report() {
+	m.bp.AddPoints(m.points)
+	if err := infConnection.Write(m.bp); err != nil {
 		log.Fatalln(err)
 	}
-	this.points = nil
+	m.points = nil
 }
 
-func (this *Monitor) collect(agent *Agent) {
+func (m *Monitor) collect(agent *Agent) {
 	defer wg.Done()
 	ch := make(chan bool)
 	go func() {
@@ -192,7 +192,7 @@ func (this *Monitor) collect(agent *Agent) {
 		if err != nil {
 			log.Fatalln(err)
 		}
-		this.points = append(this.points, pt)
+		m.points = append(m.points, pt)
 		ch <- true
 	}()
 
