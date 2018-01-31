@@ -174,7 +174,7 @@ func (this *Monitor) collect(agent *Agent) {
 		for _, field := range config.InfluxdbFields {
 			i, err := strconv.Atoi(results[field])
 			if err != nil {
-				log.Println("WARNING output format to int:", err)
+				log.Printf("WARNING output format to int: %s[%s]", field, results[field])
 				return
 			}
 			fields[field] = i
