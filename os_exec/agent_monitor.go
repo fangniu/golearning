@@ -154,6 +154,7 @@ func (this *Monitor) collect(agent *Agent) {
 		err := cmd.Run()
 		if err != nil {
 			log.Println("WARNING", err)
+			ch <- true
 			return
 		}
 		results := map[string]string{}
@@ -164,6 +165,7 @@ func (this *Monitor) collect(agent *Agent) {
 			slice := strings.SplitN(line, ":", 2)
 			if len(slice) != 2 {
 				log.Println("WARNING split output:", line)
+				ch <- true
 				return
 			}
 			results[slice[0]] = slice[1]
@@ -172,9 +174,16 @@ func (this *Monitor) collect(agent *Agent) {
 			tags[tag] = results[tag]
 		}
 		for _, field := range config.InfluxdbFields {
-			i, err := strconv.Atoi(results[field])
+			v, ok := results[field]
+			if !ok {
+				log.Printf("WARNING output format error: %s", results)
+				ch <- true
+				return
+			}
+			i, err := strconv.Atoi(v)
 			if err != nil {
 				log.Printf("WARNING output format to int: %s[%s]", field, results[field])
+				ch <- true
 				return
 			}
 			fields[field] = i
