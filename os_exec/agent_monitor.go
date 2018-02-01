@@ -154,10 +154,15 @@ func (m *Monitor) report() {
 	m.points = nil
 }
 
+func stopCollect(ch chan bool)  {
+	ch <- true
+}
+
 func (m *Monitor) collect(agent *Agent) {
 	defer wg.Done()
 	ch := make(chan bool)
 	go func() {
+		defer stopCollect(ch)
 		tags := map[string]string{}
 		fields := map[string]interface{}{}
 		cmd := exec.Command(config.ExecFile, config.LocalIp, agent.ip, strconv.Itoa(agent.port))
@@ -165,19 +170,22 @@ func (m *Monitor) collect(agent *Agent) {
 		cmd.Stdout = &out
 		err := cmd.Run()
 		if err != nil {
-			log.Println("WARNING", err)
-			ch <- true
+			log.Println("WARN", err)
 			return
 		}
 		results := map[string]string{}
+		outStr := strings.TrimSpace(out.String())
+		if outStr == "" {
+			log.Println("WARN output invalid:", agent.ip, agent.port)
+			return
+		}
 		for _, line := range strings.Split(out.String(), "\n") {
-			if line == "" {
+			if strings.TrimSpace(line) == "" {
 				continue
 			}
 			slice := strings.SplitN(line, ":", 2)
 			if len(slice) != 2 {
-				log.Println("WARNING split output:", line)
-				ch <- true
+				log.Println("WARN split output:", line)
 				return
 			}
 			results[slice[0]] = slice[1]
@@ -188,14 +196,12 @@ func (m *Monitor) collect(agent *Agent) {
 		for _, field := range config.InfluxdbFields {
 			v, ok := results[field]
 			if !ok {
-				log.Printf("WARNING output format error: %s", results)
-				ch <- true
+				log.Printf("WARN output format error: %s", results)
 				return
 			}
 			i, err := strconv.Atoi(v)
 			if err != nil {
-				log.Printf("WARNING output format to int: %s[%s]", field, results[field])
-				ch <- true
+				log.Printf("WARN output format to int: %s[%s]", field, results[field])
 				return
 			}
 			fields[field] = i
@@ -205,13 +211,12 @@ func (m *Monitor) collect(agent *Agent) {
 			log.Fatalln(err)
 		}
 		m.points = append(m.points, pt)
-		ch <- true
 	}()
 
 	select {
 	case <-ch:
 	case <-time.After(time.Duration(config.Timeout) * time.Second):
-		log.Println("WARNING timeout", agent.ip, agent.port)
+		log.Println("WARN timeout", agent.ip, agent.port)
 	}
 }
 
