@@ -74,7 +74,7 @@ func initMysqlConns() {
 		Password: config.Influxdb.Password,
 	})
 	if err != nil {
-		log.Fatalln(err)
+		log.Fatalln("ERROR fail to connect influxdb: ", config.Influxdb.Host, config.Influxdb.Port)
 	}
 }
 
@@ -82,20 +82,20 @@ func (m *Monitor) initInfluxdb() {
 	q := client.NewQuery("CREATE DATABASE "+config.Influxdb.Database, "", "")
 	response, err := infConnection.Query(q)
 	if err != nil {
-		log.Fatalln(err)
+		log.Fatalln("ERROR fail to connect influxdb:", config.Influxdb.Host, config.Influxdb.Port)
 	}
 	if response.Error() != nil {
-		log.Fatalln(response.Error())
+		log.Fatalln("ERROR fail to create database:", response.Error())
 	}
 
 	q = client.NewQuery(fmt.Sprintf("CREATE RETENTION POLICY agent_retention ON %s DURATION 30d REPLICATION 1 DEFAULT",
 		config.Influxdb.Database), "", "")
 	response, err = infConnection.Query(q)
 	if err != nil {
-		log.Fatalln(err)
+		log.Fatalln("ERROR fail to create retention:", err)
 	}
 	if response.Error() != nil {
-		log.Fatalln(response.Error())
+		log.Fatalln("ERROR fail to create retention:", response.Error())
 	}
 
 	bp, _ := client.NewBatchPoints(client.BatchPointsConfig{
@@ -111,14 +111,14 @@ func getAgents() [] *Agent {
 	for _, cgk := range cgkConnections {
 		rows, err := cgk.Query("SELECT ip_b, port_b FROM t_server WHERE server_type_id = ?", config.ServerTypeId)
 		if err != nil {
-			log.Fatalln(err)
+			log.Fatalln("ERROR fail to connect cgk:", err)
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var a Agent
 			err := rows.Scan(&a.ip, &a.port)
 			if err != nil {
-				log.Fatalln(err)
+				log.Fatalln("ERROR fail to parse agent info:", err)
 			}
 			agents = append(agents, &a)
 		}
@@ -149,7 +149,7 @@ func (m *Monitor) runCollect() {
 func (m *Monitor) report() {
 	m.bp.AddPoints(m.points)
 	if err := infConnection.Write(m.bp); err != nil {
-		log.Fatalln(err)
+		log.Fatalln("ERROR fail to report points:", err)
 	}
 	m.points = nil
 }
@@ -208,7 +208,8 @@ func (m *Monitor) collect(agent *Agent) {
 		}
 		pt, err := client.NewPoint("agent_status", tags, fields, time.Now())
 		if err != nil {
-			log.Fatalln(err)
+			log.Fatalln("ERROR new influxdb point:", err)
+			return
 		}
 		m.points = append(m.points, pt)
 	}()
@@ -226,24 +227,24 @@ func parseConfig(cfg string) {
 	}
 
 	if _, err := os.Stat(cfg); os.IsNotExist(err) {
-		log.Fatalln("config file:", cfg, "is not existent. maybe you need `mv cfg.example.json cfg.json`")
+		log.Fatalln("ERROR config file:", cfg, "is not existent. maybe you need `mv cfg.example.json cfg.json`")
 	}
 
 	data, err := ioutil.ReadFile(cfg)
 	if err != nil {
-		log.Fatalln("read config file:", cfg, "fail:", err)
+		log.Fatalln("ERROR read config file:", cfg, "fail:", err)
 	}
 	configContent := strings.TrimSpace(string(data))
 	err = json.Unmarshal([]byte(configContent), &config)
 	if err != nil {
-		log.Fatalln("parse config file:", cfg, "fail:", err)
+		log.Fatalln("ERROR parse config file:", cfg, "fail:", err)
 	}
 	log.Println("INFO read config file:", cfg, "successfully")
 	for _, cgk := range config.Cgks {
 		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s", cgk.User, cgk.Passwd, cgk.Host, cgk.Port, cgk.Db, cgk.Charset)
 		db, err := sql.Open("mysql", dsn)
 		if err != nil {
-			log.Fatalln("Mysql connection error:", cgk, "fail:", err)
+			log.Fatalln("ERROR Mysql connection error:", cgk, "fail:", err)
 		}
 		cgkConnections = append(cgkConnections, db)
 	}
