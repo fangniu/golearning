@@ -1,0 +1,16 @@
+{
+  "kafka": {
+    "brokers": ["10.33.124.48:9092", "10.33.124.69:9092", "10.33.126.39:9092"],
+    "topics": ["kafka_service_test"],
+    "group_id": "influxdb",
+    "oldest": true
+  },
+  "influxdb": {
+    "addr": "http://localhost:8086",
+    "username": "admin",
+    "password": "admin",
+    "database": "service",
+    "measurement": "service",
+  },
+  "limit": 2000
+}

@@ -161,11 +161,11 @@ func stopCollect(ch chan bool)  {
 func (m *Monitor) collect(agent *Agent) {
 	defer wg.Done()
 	ch := make(chan bool)
+	cmd := exec.Command(config.ExecFile, config.LocalIp, agent.ip, strconv.Itoa(agent.port))
 	go func() {
 		defer stopCollect(ch)
 		tags := map[string]string{}
 		fields := map[string]interface{}{}
-		cmd := exec.Command(config.ExecFile, config.LocalIp, agent.ip, strconv.Itoa(agent.port))
 		var out bytes.Buffer
 		cmd.Stdout = &out
 		err := cmd.Run()
@@ -216,7 +216,11 @@ func (m *Monitor) collect(agent *Agent) {
 
 	select {
 	case <-ch:
+		close(ch)
 	case <-time.After(time.Duration(config.Timeout) * time.Second):
+		if err := cmd.Process.Kill(); err != nil {
+			log.Fatal("WARN failed to kill: ", err)
+		}
 		log.Println("WARN timeout", agent.ip, agent.port)
 	}
 }
