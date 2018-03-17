@@ -55,7 +55,6 @@ type Agent struct {
 }
 
 type Monitor struct {
-	bp     client.BatchPoints
 	points []*client.Point
 }
 
@@ -64,6 +63,7 @@ var (
 	cgkConnections []*sql.DB
 	infConnection  client.Client
 	wg             sync.WaitGroup
+	execTimeout		time.Duration
 )
 
 func initMysqlConns() {
@@ -98,12 +98,6 @@ func (m *Monitor) initInfluxdb() {
 		log.Fatalln("ERROR fail to create retention:", response.Error())
 	}
 
-	bp, _ := client.NewBatchPoints(client.BatchPointsConfig{
-		Precision: "s",
-		Database:  config.Influxdb.Database,
-	})
-	bp.SetRetentionPolicy("agent_retention")
-	m.bp = bp
 }
 
 func getAgents() [] *Agent {
@@ -135,7 +129,7 @@ func (m *Monitor) close() {
 }
 
 func (m *Monitor) runCollect() {
-	for true {
+	for {
 		for _, agent := range getAgents() {
 			wg.Add(1)
 			go m.collect(agent)
@@ -147,28 +141,41 @@ func (m *Monitor) runCollect() {
 }
 
 func (m *Monitor) report() {
-	m.bp.AddPoints(m.points)
-	if err := infConnection.Write(m.bp); err != nil {
+	bp, err := client.NewBatchPoints(client.BatchPointsConfig{
+		Precision: "s",
+		Database:  config.Influxdb.Database,
+	})
+	if err != nil {
+		log.Fatalln("ERROR fail to create bp:", err)
+	}
+	bp.SetRetentionPolicy("agent_retention")
+	bp.AddPoints(m.points)
+	if err = infConnection.Write(bp); err != nil {
 		log.Fatalln("ERROR fail to report points:", err)
 	}
 	m.points = nil
 }
 
-func stopCollect(ch chan bool)  {
-	ch <- true
-}
-
 func (m *Monitor) collect(agent *Agent) {
 	defer wg.Done()
-	ch := make(chan bool)
+	done := make(chan struct{})
+	var out bytes.Buffer
 	cmd := exec.Command(config.ExecFile, config.LocalIp, agent.ip, strconv.Itoa(agent.port))
+	cmd.Stdout = &out
+	err := cmd.Start()
+	if err != nil {
+		log.Println("WARN failed to execute command: ", err)
+		return
+	}
+
 	go func() {
-		defer stopCollect(ch)
+		defer func() {
+			done <- struct{}{}
+		}()
 		tags := map[string]string{}
 		fields := map[string]interface{}{}
-		var out bytes.Buffer
-		cmd.Stdout = &out
-		err := cmd.Run()
+
+		err := cmd.Wait()
 		if err != nil {
 			log.Println("WARN", err)
 			return
@@ -179,6 +186,7 @@ func (m *Monitor) collect(agent *Agent) {
 			log.Println("WARN output invalid:", agent.ip, agent.port)
 			return
 		}
+		//fmt.Println(outStr)
 		for _, line := range strings.Split(out.String(), "\n") {
 			if strings.TrimSpace(line) == "" {
 				continue
@@ -215,11 +223,11 @@ func (m *Monitor) collect(agent *Agent) {
 	}()
 
 	select {
-	case <-ch:
-		close(ch)
-	case <-time.After(time.Duration(config.Timeout) * time.Second):
+	case <-done:
+		return
+	case <-time.After(execTimeout):
 		if err := cmd.Process.Kill(); err != nil {
-			log.Fatal("WARN failed to kill: ", err)
+			log.Println("WARN failed to kill: ", err)
 		}
 		log.Println("WARN timeout", agent.ip, agent.port)
 	}
@@ -243,6 +251,7 @@ func parseConfig(cfg string) {
 	if err != nil {
 		log.Fatalln("ERROR parse config file:", cfg, "fail:", err)
 	}
+	execTimeout = time.Duration(config.Timeout) * time.Second
 	log.Println("INFO read config file:", cfg, "successfully")
 	for _, cgk := range config.Cgks {
 		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s", cgk.User, cgk.Passwd, cgk.Host, cgk.Port, cgk.Db, cgk.Charset)

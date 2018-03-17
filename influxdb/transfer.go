@@ -120,8 +120,8 @@ func (t *Transfer) consume() {
 		var s Service
 		err := json.Unmarshal(msg.Value, &s)
 		if err != nil {
-			log.Fatalln("ERROR Unmarshal:", msg.Value)
-			return
+			log.Println("WARN Unmarshal:", msg.Value)
+			continue
 		}
 		tags := map[string]string{
 			"service_name": s.ServiceName,
