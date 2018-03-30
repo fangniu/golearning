@@ -1,0 +1,23 @@
+syntax = "proto2";
+package monitor_system;
+
+// agent服务状态响应包
+message AgentServerStatusResponse {
+    required string str_local_ip      = 1;       // 本机IP地址
+    required uint32 local_port        = 2;	     // 本机端口
+    required uint32 collect_interval  = 3;       // 统计间隔（单位秒)
+
+    required string zk_hosts          = 4;	     // zk 地址
+    required string zk_agent_path     = 5;       // 本服务注册路径
+    required string zk_proxy_path     = 6;       // proxy服务注册路径
+    required uint32 zk_check_interval = 7;       // zookeeper定时检测间隔(单位：秒)
+
+    required string queue_name	      = 8;	     // 共享内存队列名称
+    required uint32 queue_ele_size    = 9;       // 共享内存队列元素大小
+    required uint32 queue_ele_count   = 10;      // 共享内存队列元素个数
+
+    required uint64 process_count     = 11;      // 处理数据总条数
+    required uint64 process_per_sec   = 12;      // 每秒处理数据条数
+    required uint32 proxy_size        = 13;      // 可用proxy数量
+    required uint32 attr_size         = 14;      // 正在处理的数据类型条数
+}

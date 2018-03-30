@@ -7,16 +7,17 @@ import (
 	"os"
 	"time"
 	"sync"
-	"os/exec"
 	"io/ioutil"
 	"strings"
-	"bytes"
-	"strconv"
 	"encoding/json"
 	"database/sql"
 
 	"github.com/influxdata/influxdb/client/v2"
 	_ "github.com/go-sql-driver/mysql"
+	"net"
+	"bufio"
+	"github.com/golang/protobuf/proto"
+	"errors"
 )
 
 type Cgk struct {
@@ -52,6 +53,7 @@ type GlobalConfig struct {
 type Agent struct {
 	ip   string
 	port int
+	addr string
 }
 
 type Monitor struct {
@@ -64,6 +66,9 @@ var (
 	infConnection  client.Client
 	wg             sync.WaitGroup
 	execTimeout		time.Duration
+	requestUdp = []byte{0, 4, 1, 0, 0, 0, 0}
+	PackageHeaderError = errors.New("package header error")
+	PackageError = errors.New("package error")
 )
 
 func initMysqlConns() {
@@ -114,6 +119,7 @@ func getAgents() [] *Agent {
 			if err != nil {
 				log.Fatalln("ERROR fail to parse agent info:", err)
 			}
+			a.addr = fmt.Sprintf("%v:%v", a.ip, a.port)
 			agents = append(agents, &a)
 		}
 	}
@@ -156,79 +162,80 @@ func (m *Monitor) report() {
 	m.points = nil
 }
 
-func (m *Monitor) collect(agent *Agent) {
-	defer wg.Done()
-	done := make(chan struct{})
-	var out bytes.Buffer
-	cmd := exec.Command(config.ExecFile, config.LocalIp, agent.ip, strconv.Itoa(agent.port))
-	cmd.Stdout = &out
-	err := cmd.Start()
+func (m *Monitor) getAgentData(agent *Agent) (err error) {
+	var conn net.Conn
+	var n int
+	conn, err = net.Dial("udp", agent.addr)
 	if err != nil {
-		log.Println("WARN failed to execute command: ", err)
+		return
+	}
+	defer conn.Close()
+	reader := bufio.NewReaderSize(conn, 8192)
+	_, err = conn.Write(requestUdp)
+	if err != nil {
+		return
+	}
+	resp :=  make([]byte, 7)
+	n, err = reader.Read(resp)
+	if err != nil {
 		return
 	}
 
-	go func() {
-		defer func() {
-			done <- struct{}{}
-		}()
+	if n == 7 && resp[1] == 5 && resp[2] == 1 {
+		var length int
+		for _, v := range resp[3:] {
+			length = length*256 + int(v)
+		}
+		var assr AgentServerStatusResponse
+		buf := make([]byte, length)
+		n, err = reader.Read(buf)
+		if err != nil {
+			return
+		}
+		if n != length {
+			err = PackageHeaderError
+			return
+		}
+		err = proto.Unmarshal(buf, &assr)
+		if err != nil {
+			return
+		}
 		tags := map[string]string{}
 		fields := map[string]interface{}{}
-
-		err := cmd.Wait()
+		tags["str_local_ip"] = assr.GetStrLocalIp()
+		tags["local_port"] = fmt.Sprintf("%d", assr.GetLocalPort())
+		tags["queue_name"] = assr.GetQueueName()
+		tags["zk_hosts"] = assr.GetZkHosts()
+		fields["queue_ele_size"] = assr.GetQueueEleSize()
+		fields["queue_ele_count"] = assr.GetQueueEleCount()
+		fields["process_count"] = int(assr.GetProcessCount())
+		fields["process_per_sec"] = int(assr.GetProcessPerSec())
+		fields["proxy_size"] = assr.GetProxySize()
+		fields["attr_size"] = assr.GetAttrSize()
+		var pt *client.Point
+		pt, err = client.NewPoint("agent_status", tags, fields, time.Now())
 		if err != nil {
-			log.Println("WARN", err)
-			return
-		}
-		results := map[string]string{}
-		outStr := strings.TrimSpace(out.String())
-		if outStr == "" {
-			log.Println("WARN output invalid:", agent.ip, agent.port)
-			return
-		}
-		//fmt.Println(outStr)
-		for _, line := range strings.Split(out.String(), "\n") {
-			if strings.TrimSpace(line) == "" {
-				continue
-			}
-			slice := strings.SplitN(line, ":", 2)
-			if len(slice) != 2 {
-				log.Println("WARN split output:", line)
-				return
-			}
-			results[slice[0]] = slice[1]
-		}
-		for _, tag := range config.InfluxdbTags {
-			tags[tag] = results[tag]
-		}
-		for _, field := range config.InfluxdbFields {
-			v, ok := results[field]
-			if !ok {
-				log.Printf("WARN output format error: %s", results)
-				return
-			}
-			i, err := strconv.Atoi(v)
-			if err != nil {
-				log.Printf("WARN output format to int: %s[%s]", field, results[field])
-				return
-			}
-			fields[field] = i
-		}
-		pt, err := client.NewPoint("agent_status", tags, fields, time.Now())
-		if err != nil {
-			log.Fatalln("ERROR new influxdb point:", err)
 			return
 		}
 		m.points = append(m.points, pt)
+	}
+	return PackageError
+}
+
+func (m *Monitor) collect(agent *Agent) {
+	defer wg.Done()
+	done := make(chan error, 1)
+
+	go func() {
+		done <- m.getAgentData(agent)
 	}()
 
 	select {
-	case <-done:
-		return
-	case <-time.After(execTimeout):
-		if err := cmd.Process.Kill(); err != nil {
-			log.Println("WARN failed to kill: ", err)
+	case err := <-done:
+		if err != nil {
+			log.Println("WARN failed to get agent data: ", err, agent.addr)
 		}
+	case <-time.After(execTimeout):
 		log.Println("WARN timeout", agent.ip, agent.port)
 	}
 }
