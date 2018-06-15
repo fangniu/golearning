@@ -64,34 +64,10 @@ type Transfer struct {
 
 func (t *Transfer) connect() {
 	var err error
-	t.influxdbClient, err = client.NewHTTPClient(client.HTTPConfig{
-		Addr:     config.InfluxDB.Addr,
-		Username: config.InfluxDB.Username,
-		Password: config.InfluxDB.Password,
-	})
+	err = t.connectInf()
 	if err != nil {
-		log.Fatal("ERROR 连接influxdb失败： ", err)
+		log.Fatal("ERROR 连接influxdb失败")
 	}
-	q := client.NewQuery("CREATE DATABASE "+config.InfluxDB.Database, "", "")
-	response, err := t.influxdbClient.Query(q)
-	if err != nil {
-		log.Fatalln("ERROR fail to connect influxdb:", config.InfluxDB.Addr)
-	}
-	if response.Error() != nil {
-		log.Fatalln("ERROR fail to create database:", response.Error())
-	}
-
-	q = client.NewQuery(fmt.Sprintf("CREATE RETENTION POLICY service_retention ON %s DURATION 30d REPLICATION 1 DEFAULT",
-		config.InfluxDB.Database), "", "")
-	response, err = t.influxdbClient.Query(q)
-	if err != nil {
-		log.Fatalln("ERROR fail to create retention:", err)
-	}
-	if response.Error() != nil {
-		log.Fatalln("ERROR fail to create retention:", response.Error())
-	}
-	log.Println("连接influxdb成功:", config.InfluxDB.Addr)
-
 	kafkaConfig := cluster.NewConfig()
 	//kafkaConfig.Group.Mode = cluster.ConsumerModePartitions
 	if config.Kafka.Oldest {
@@ -105,6 +81,45 @@ func (t *Transfer) connect() {
 	}
 	log.Println("连接kafka成功:", config.Kafka.Brokers)
 }
+
+func (t *Transfer) connectInf() (err error){
+	t.influxdbClient, err = client.NewHTTPClient(client.HTTPConfig{
+		Addr:     config.InfluxDB.Addr,
+		Username: config.InfluxDB.Username,
+		Password: config.InfluxDB.Password,
+	})
+	if err != nil {
+		log.Println("ERROR 连接influxdb失败： ", err)
+		return
+	}
+	q := client.NewQuery("CREATE DATABASE "+config.InfluxDB.Database, "", "")
+	response, err := t.influxdbClient.Query(q)
+	if err != nil {
+		log.Println("ERROR fail to connect influxdb:", config.InfluxDB.Addr)
+		return
+	}
+	if response.Error() != nil {
+		log.Println("ERROR fail to create database:", response.Error())
+		err = response.Error()
+		return
+	}
+
+	q = client.NewQuery(fmt.Sprintf("CREATE RETENTION POLICY service_retention ON %s DURATION 30d REPLICATION 1 DEFAULT",
+		config.InfluxDB.Database), "", "")
+	response, err = t.influxdbClient.Query(q)
+	if err != nil {
+		log.Println("ERROR fail to create retention:", err)
+		return
+	}
+	if response.Error() != nil {
+		log.Println("ERROR fail to create retention:", response.Error())
+		err = response.Error()
+		return
+	}
+	log.Println("连接influxdb成功:", config.InfluxDB.Addr)
+	return
+}
+
 
 func (t *Transfer) run() {
 	var wg sync.WaitGroup
@@ -155,19 +170,15 @@ func (t *Transfer) markOffset() {
 }
 
 func (t *Transfer) combinePoints() {
-	var points []*client.Point
 	for {
-		select {
-		case point := <-t.buffer:
-			points = append(points, point)
-		case <-time.After(time.Millisecond * 50):
-			go t.write(points)
-			points = nil
+		point := <-t.buffer
+		var points []*client.Point
+		points = append(points, point)
+		length := len(t.buffer)
+		for i:=0; i < length && i < config.Limit - 1; i++ {
+			points = append(points, <-t.buffer)
 		}
-		if len(points) >= config.Limit {
-			go t.write(points)
-			points = nil
-		}
+		t.write(points)
 	}
 }
 
@@ -180,15 +191,27 @@ func (t *Transfer) write(points []*client.Point) {
 		Precision: "s",
 	})
 	if err != nil {
-		log.Fatal("ERROR influxdb 创建BatchPoints失败", err)
+		log.Fatalln("ERROR influxdb 创建BatchPoints失败", err)
 	}
 	bp.AddPoints(points)
 	start := time.Now()
 	if err := t.influxdbClient.Write(bp); err != nil {
-		log.Fatalln("ERROR fail to write points:", err)
+		log.Println("ERROR fail to write points:", err)
+		t.reconnectInf()
 	}
 	if t.debug {
 		log.Println("INFO writed points count: ", len(points), time.Now().Sub(start))
+	}
+}
+
+func (t *Transfer) reconnectInf() {
+	for {
+		err := t.connectInf()
+		if err != nil {
+			time.Sleep(time.Second * 10)
+		} else {
+			return
+		}
 	}
 }
 
@@ -229,7 +252,7 @@ func main() {
 
 	transfer := Transfer{
 		debug:  *debug,
-		buffer: make(chan *client.Point, config.Limit),
+		buffer: make(chan *client.Point, config.Limit*10),
 	}
 	transfer.connect()
 	transfer.run()

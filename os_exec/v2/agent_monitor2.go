@@ -11,13 +11,13 @@ import (
 	"strings"
 	"encoding/json"
 	"database/sql"
-	"context"
 	"github.com/influxdata/influxdb/client/v2"
 	_ "github.com/go-sql-driver/mysql"
 	"net"
 	"bufio"
 	"github.com/golang/protobuf/proto"
 	"errors"
+	"runtime"
 )
 
 type Cgk struct {
@@ -57,15 +57,16 @@ type Agent struct {
 }
 
 type Monitor struct {
-	points []*client.Point
+
 }
 
 var (
 	config         *GlobalConfig
 	cgkConnections []*sql.DB
+	reconnecting bool
+	lock sync.RWMutex
 	infConnection  client.Client
 	execTimeout		time.Duration
-	wg sync.WaitGroup
 	requestUdp = []byte{0, 4, 1, 0, 0, 0, 0}
 	PackageHeaderError = errors.New("package header error")
 	PackageError = errors.New("package error")
@@ -80,7 +81,7 @@ func (m *Monitor) initInfluxdb() {
 		Password: config.Influxdb.Password,
 	})
 	if err != nil {
-		log.Fatalln("ERROR fail to connect influxdb: ", config.Influxdb.Host, config.Influxdb.Port)
+		log.Fatalln("ERROR fail to connect influxdb:", config.Influxdb.Host, config.Influxdb.Port)
 	}
 	q := client.NewQuery("CREATE DATABASE "+config.Influxdb.Database, "", "")
 	response, err := infConnection.Query(q)
@@ -103,6 +104,21 @@ func (m *Monitor) initInfluxdb() {
 
 }
 
+func reconnectInf()  {
+	reconnecting = true
+	var err error
+	infConnection, err = client.NewHTTPClient(client.HTTPConfig{
+		Addr:     fmt.Sprintf("http://%s:%d", config.Influxdb.Host, config.Influxdb.Port),
+		Username: config.Influxdb.Username,
+		Password: config.Influxdb.Password,
+	})
+	if err != nil {
+		log.Println("ERROR fail to connect influxdb:", config.Influxdb.Host, config.Influxdb.Port)
+		return
+	}
+	reconnecting = false
+}
+
 func getAgents() [] *Agent {
 	var agents [] *Agent
 	for _, cgk := range cgkConnections {
@@ -117,7 +133,7 @@ func getAgents() [] *Agent {
 			if err != nil {
 				log.Fatalln("ERROR fail to parse agent info:", err)
 			}
-			a.addr = fmt.Sprintf("%v:%v", a.ip, a.port)
+			a.addr = fmt.Sprintf("%v:%v", strings.TrimSpace(a.ip), a.port)
 			agents = append(agents, &a)
 		}
 	}
@@ -134,53 +150,32 @@ func (m *Monitor) close() {
 
 func (m *Monitor) runCollect() {
 	for {
-		ctx, _ := context.WithTimeout(context.Background(), execTimeout)
-		for _, agent := range getAgents() {
-			wg.Add(1)
-			go m.collect(ctx, agent)
+		if !reconnecting {
+			for _, agent := range getAgents() {
+				go m.collect(agent)
+			}
 		}
-		wg.Wait()
-		m.report()
 		time.Sleep(time.Duration(config.Interval) * time.Second)
+		log.Println("INFO NumGoroutine:", runtime.NumGoroutine())
 	}
 }
 
-func (m *Monitor) report() {
-	defer func() { // 必须要先声明defer，否则不能捕获到panic异常
-		if err := recover(); err != nil {
-			log.Fatalln("ERROR panic", err)
-		}
-	}()
-	bp, err := client.NewBatchPoints(client.BatchPointsConfig{
-		Precision: "s",
-		Database:  config.Influxdb.Database,
-	})
-	if err != nil {
-		log.Fatalln("ERROR fail to create bp:", err)
-	}
-	bp.SetRetentionPolicy("agent_retention")
-	bp.AddPoints(m.points)
-	if err = infConnection.Write(bp); err != nil {
-		log.Fatalln("ERROR fail to report points:", err)
-	}
-	m.points = nil
-}
 
-func (m *Monitor) getAgentData(conn net.Conn, ch chan error) {
+func (m *Monitor) getAgentData(conn net.Conn) <-chan error {
 	var err error
-	defer func() {
-		ch <- err
-	}()
+	done := make(chan error, 1)
 	reader := bufio.NewReaderSize(conn, 8192)
 	_, err = conn.Write(requestUdp)
 	if err != nil {
-		return
+		done <- err
+		return done
 	}
 	resp :=  make([]byte, 7)
 	var n int
 	n, err = reader.Read(resp)
 	if err != nil {
-		return
+		done <- err
+		return done
 	}
 
 	if n == 7 && resp[1] == 5 && resp[2] == 1 {
@@ -192,15 +187,18 @@ func (m *Monitor) getAgentData(conn net.Conn, ch chan error) {
 		buf := make([]byte, length)
 		n, err = reader.Read(buf)
 		if err != nil {
-			return
+			done <- err
+			return done
 		}
 		if n != length {
 			err = PackageHeaderError
-			return
+			done <- err
+			return done
 		}
 		err = proto.Unmarshal(buf, &assr)
 		if err != nil {
-			return
+			done <- err
+			return done
 		}
 		tags := map[string]string{}
 		fields := map[string]interface{}{}
@@ -217,29 +215,52 @@ func (m *Monitor) getAgentData(conn net.Conn, ch chan error) {
 		var pt *client.Point
 		pt, err = client.NewPoint("agent_status", tags, fields, time.Now())
 		if err != nil {
-			return
+			done <- err
+			return done
 		}
-		m.points = append(m.points, pt)
+		writePoint(pt)
+		done <- nil
+		return done
 	}
-	err = PackageError
+	done <- PackageError
+	return done
 }
 
-func (m *Monitor) collect(ctx context.Context, agent *Agent) {
-	defer wg.Done()
-	conn, err := net.DialTimeout("udp", agent.addr, time.Second*1)
+func writePoint(pt *client.Point)  {
+	lock.Lock()
+	defer lock.Unlock()
+	bp, err := client.NewBatchPoints(client.BatchPointsConfig{
+		Precision: "s",
+		Database:  config.Influxdb.Database,
+	})
 	if err != nil {
-		log.Println("WARN failed to connect ", agent.addr, err)
+		log.Println("ERROR fail to create bp:", err)
+		reconnectInf()
 		return
 	}
-	ch := make(chan error, 1)
-	go m.getAgentData(conn, ch)
+	bp.SetRetentionPolicy("agent_retention")
+	bp.AddPoint(pt)
+	if err = infConnection.Write(bp); err != nil {
+		log.Println("ERROR fail to report point:", err)
+		reconnectInf()
+		return
+	}
+}
+
+func (m *Monitor) collect(agent *Agent) {
+	conn, err := net.DialTimeout("udp", agent.addr, time.Second*1)
+	if err != nil {
+		log.Println("WARN failed to connect", agent.addr, err)
+		return
+	}
+	conn.SetDeadline(time.Now().Add(execTimeout))
+	defer conn.Close()
 	select {
-	case <-ctx.Done():
-		conn.Close()
+	case <-time.After(execTimeout):
 		log.Println("WARN get agent data timeout:", agent.addr)
-	case err = <- ch:
+	case err = <- m.getAgentData(conn):
 		if err != nil {
-			log.Println("WARN failed to get agent data: ", err, agent.addr)
+			log.Println("WARN failed to get agent data:", err, agent.addr)
 		}
 	}
 }
