@@ -135,7 +135,7 @@ func (t *Transfer) consume() {
 		var s Service
 		err := json.Unmarshal(msg.Value, &s)
 		if err != nil {
-			log.Println("WARN Unmarshal:", msg.Value)
+			log.Println("WARN Unmarshal:", string(msg.Value))
 			continue
 		}
 		tags := map[string]string{
