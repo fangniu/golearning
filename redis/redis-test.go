@@ -41,10 +41,10 @@ var (
 	zRemCommand, zIncrByCommand, zRangeCommand, hGetCommand, hmGetCommand, hSetCommand, hmSetCommand,
 	hIncrByCommand       *Command
 
-	dataChan      = make(chan Data, 100000)
-	signalExit    = make(chan os.Signal, 1)
-	genExit       = make(chan struct{})
-	errLogChan    = make(chan string, 200000)
+	dataChan            = make(chan Data, 100000)
+	signalExit          = make(chan os.Signal, 1)
+	genExit             = make(chan struct{})
+	errLogChan          = make(chan string, 200000)
 	slowThreshold int64 = 20
 	startTime     int64
 	fixedValue    []byte
@@ -367,7 +367,7 @@ func logError() {
 	if err != nil {
 		log.Fatalln("[ERROR] failed to open file:", err)
 	}
-	for s := range errLogChan{
+	for s := range errLogChan {
 		if _, err = f.WriteString(s); err != nil {
 			log.Fatalln("[ERROR] failed to write log:", err)
 		}
@@ -577,7 +577,7 @@ func main() {
 
 }
 
-func run()  {
+func run() {
 	signal.Notify(signalExit, syscall.SIGINT, syscall.SIGTERM)
 	allCommands = newCommands()
 	connectServer(addr, clientsNum)
@@ -588,4 +588,3 @@ func run()  {
 	wg.Wait()
 	summary()
 }
-
