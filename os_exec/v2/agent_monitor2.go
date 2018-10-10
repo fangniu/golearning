@@ -79,6 +79,7 @@ func (m *Monitor) initInfluxdb() {
 		Addr:     fmt.Sprintf("http://%s:%d", config.Influxdb.Host, config.Influxdb.Port),
 		Username: config.Influxdb.Username,
 		Password: config.Influxdb.Password,
+		Timeout: time.Second * 3,
 	})
 	if err != nil {
 		log.Fatalln("ERROR fail to connect influxdb:", config.Influxdb.Host, config.Influxdb.Port)
@@ -151,12 +152,14 @@ func (m *Monitor) close() {
 func (m *Monitor) runCollect() {
 	for {
 		if !reconnecting {
-			for _, agent := range getAgents() {
+			agents := getAgents()
+			for _, agent := range agents {
 				go m.collect(agent)
 			}
+			log.Println("[INFO] NumAgents:", len(agents))
 		}
 		time.Sleep(time.Duration(config.Interval) * time.Second)
-		log.Println("INFO NumGoroutine:", runtime.NumGoroutine())
+		log.Println("[INFO] NumGoroutine:", runtime.NumGoroutine())
 	}
 }
 
@@ -227,8 +230,9 @@ func (m *Monitor) getAgentData(conn net.Conn) <-chan error {
 }
 
 func writePoint(pt *client.Point)  {
-	lock.Lock()
-	defer lock.Unlock()
+	if reconnecting {
+		return
+	}
 	bp, err := client.NewBatchPoints(client.BatchPointsConfig{
 		Precision: "s",
 		Database:  config.Influxdb.Database,
